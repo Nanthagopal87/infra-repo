@@ -1,34 +1,3 @@
-Got it.
-I’ll give you a **single, one-shot Bash setup script** that:
-
-* Creates **two VPCs** (Producer + Consumer) in the **same project**
-* Creates **Cloud NAT** for private VM outbound internet
-* Creates **internal-only NGINX VM**
-* Creates **Internal Load Balancer**
-* Creates **PSC Service Attachment**
-* Creates **PSC Endpoint in Consumer VPC**
-* Creates **Consumer test VM**
-* Verifies **curl works** privately end-to-end
-
----
-
-### ✅ Before Running — Set Your Values
-
-Choose region & zones:
-
-```
-PROJECT_ID="your-project-id"
-REGION="asia-south1"
-ZONE="${REGION}-a"
-```
-
----
-
-### 🚀 **FULL AUTOMATED SETUP SCRIPT**
-
-Copy → paste into **Cloud Shell**:
-
-```bash
 #!/bin/bash
 
 set -e
@@ -62,6 +31,14 @@ PSC_EP_FR="psc-endpoint"
 ROUTER="prod-router"
 NAT="prod-nat"
 
+# Firewall Rule Names
+PROD_FW_SSH="prod-fw-allow-ssh"
+PROD_FW_ILB_HC="prod-fw-allow-ilb-hc"
+PROD_FW_EGRESS="prod-fw-allow-egress"
+
+CONS_FW_SSH="cons-fw-allow-ssh"
+CONS_FW_EGRESS="cons-fw-allow-egress"
+
 # -------------------------
 echo "Enabling Compute API..."
 gcloud services enable compute.googleapis.com --project=$PROJECT_ID
@@ -92,6 +69,49 @@ gcloud compute routers nats create $NAT \
   --auto-allocate-nat-external-ips --nat-all-subnet-ip-ranges
 
 # -------------------------
+echo "Creating Producer VPC Firewall Rules..."
+
+# Allow SSH from IAP for the NGINX VM (and other management)
+gcloud compute firewall-rules create $PROD_FW_SSH \
+  --project=$PROJECT_ID --network=$PROD_VPC \
+  --allow=tcp:22 --source-ranges=35.235.240.0/20 \
+  --description="Allow SSH from IAP for producer VMs"
+
+# Allow ingress for internal load balancer health checks
+gcloud compute firewall-rules create $PROD_FW_ILB_HC \
+  --project=$PROJECT_ID --network=$PROD_VPC \
+  --allow=tcp:80 \
+  --source-ranges=130.211.0.0/22,35.191.0.0/16 \
+  --target-tags=nginx \
+  --description="Allow health check traffic to NGINX VMs"
+
+# Allow all egress for producer VMs (e.g., for apt updates)
+gcloud compute firewall-rules create $PROD_FW_EGRESS \
+  --project=$PROJECT_ID --network=$PROD_VPC \
+  --allow=all \
+  --destination-ranges=0.0.0.0/0 \
+  --direction=EGRESS \
+  --description="Allow all egress traffic from producer VMs"
+
+# -------------------------
+echo "Creating Consumer VPC Firewall Rules..."
+
+# Allow SSH from IAP for the client VM
+gcloud compute firewall-rules create $CONS_FW_SSH \
+  --project=$PROJECT_ID --network=$CONS_VPC \
+  --allow=tcp:22 --source-ranges=35.235.240.0/20 \
+  --description="Allow SSH from IAP for consumer VMs"
+
+# Allow all egress for consumer VMs (e.g., to reach PSC endpoint)
+gcloud compute firewall-rules create $CONS_FW_EGRESS \
+  --project=$PROJECT_ID --network=$CONS_VPC \
+  --allow=all \
+  --destination-ranges=0.0.0.0/0 \
+  --direction=EGRESS \
+  --description="Allow all egress traffic from consumer VMs"
+
+
+# -------------------------
 echo "Creating Internal-only NGINX VM..."
 gcloud compute instances create $NGINX_VM \
   --project=$PROJECT_ID --zone=$ZONE \
@@ -107,7 +127,7 @@ sudo apt update && sudo apt install -y nginx && sudo systemctl enable --now ngin
 "
 
 # -------------------------
-echo "Creating Instance Group..."
+echo "Creating Instance Group for NGINX..."
 gcloud compute instance-groups unmanaged create $IG_NAME --project=$PROJECT_ID --zone=$ZONE
 gcloud compute instance-groups unmanaged add-instances $IG_NAME --instances=$NGINX_VM --zone=$ZONE --project=$PROJECT_ID
 
@@ -122,83 +142,4 @@ gcloud compute backend-services create $BS_NAME \
   --protocol=HTTP --load-balancing-scheme=INTERNAL_MANAGED \
   --health-checks=$HC_NAME
 
-gcloud compute backend-services add-backend $BS_NAME \
-  --project=$PROJECT_ID --region=$REGION \
-  --instance-group=$IG_NAME --instance-group-region=$REGION
-
-# -------------------------
-echo "Creating Internal Load Balancer..."
-gcloud compute addresses create $ILB_IP \
-  --project=$PROJECT_ID --region=$REGION --subnet=$PROD_SUBNET
-
-gcloud compute forwarding-rules create $ILB_FR \
-  --project=$PROJECT_ID --region=$REGION \
-  --load-balancing-scheme=INTERNAL_MANAGED \
-  --address=$ILB_IP --ports=80 \
-  --backend-service=$BS_NAME
-
-# -------------------------
-echo "Creating PSC NAT Subnet..."
-gcloud compute networks subnets create $PSC_NAT_SUBNET \
-  --project=$PROJECT_ID --region=$REGION \
-  --network=$PROD_VPC --range=10.0.1.0/28 \
-  --purpose=PRIVATE_SERVICE_CONNECT
-
-# -------------------------
-echo "Creating Service Attachment..."
-gcloud compute service-attachments create $SA_NAME \
-  --project=$PROJECT_ID --region=$REGION \
-  --producer-forwarding-rule=$ILB_FR \
-  --connection-preference=ACCEPT_AUTOMATIC \
-  --nat-subnets=$PSC_NAT_SUBNET
-
-SA_URI=$(gcloud compute service-attachments describe $SA_NAME \
-  --project=$PROJECT_ID --region=$REGION --format="value(selfLink)")
-
-# -------------------------
-echo "Creating PSC Endpoint in Consumer VPC..."
-gcloud compute addresses create $PSC_EP_IP \
-  --project=$PROJECT_ID --region=$REGION --subnet=$CONS_SUBNET
-
-gcloud compute forwarding-rules create $PSC_EP_FR \
-  --project=$PROJECT_ID --region=$REGION \
-  --network=$CONS_VPC --address=$PSC_EP_IP --ports=80 \
-  --target-service-attachment=$SA_URI
-
-# -------------------------
-echo "Creating Consumer Test VM..."
-gcloud compute instances create $CLIENT_VM \
-  --project=$PROJECT_ID --zone=$ZONE \
-  --machine-type=e2-micro \
-  --subnet=$CONS_SUBNET \
-  --no-address
-
-EP_IP=$(gcloud compute addresses describe $PSC_EP_IP --project=$PROJECT_ID --region=$REGION --format="value(address)")
-
-echo "Testing connection from consumer VM..."
-gcloud compute ssh $CLIENT_VM --project=$PROJECT_ID --zone=$ZONE --tunnel-through-iap --command "
-curl -v http://$EP_IP
-"
-
-echo "✅ PSC setup completed successfully."
-```
-
----
-
-## ✅ Expected Output
-
-* The final `curl` command prints the **NGINX Welcome Page HTML**
-* No VM has external IPs
-* Traffic flows **private → PSC → ILB → NGINX**
-
----
-
-## 🎯 Next Options
-
-Would you like me to also provide:
-
-**A. Architecture Diagram (PNG)**
-**B. Terraform Version**
-**C. GitLab CI pipeline to deploy this**
-
-Reply: **A**, **B**, or **C**.
+gcloud com

@@ -93,6 +93,15 @@ gcloud compute firewall-rules create $PROD_FW_EGRESS \
   --direction=EGRESS \
   --description="Allow all egress traffic from producer VMs"
 
+# Allow incoming HTTP traffic from the PSC NAT Subnet to NGINX VMs
+
+gcloud compute firewall-rules create prod-fw-allow-psc-ingress \
+  --project=$PROJECT_ID --network=$PROD_VPC \
+  --allow=tcp:80 \
+  --source-ranges=10.0.1.0/28 \
+  --target-tags=nginx \
+  --description="Allow HTTP traffic from PSC NAT subnet to NGINX VMs"
+
 # -------------------------
 echo "Creating Consumer VPC Firewall Rules..."
 

@@ -150,8 +150,7 @@ gcloud compute backend-services add-backend $BS_NAME \
 echo "Creating Internal Load Balancer..."
 gcloud compute addresses create $ILB_IP \
   --project=$PROJECT_ID --region=$REGION --subnet=$PROD_SUBNET \
-  --purpose=SHARED_LOADBALANCER_VIP \
-  --prefix-length=32 # Required for internal load balancers
+ --network-tier=PREMIUM
 
 gcloud compute forwarding-rules create $ILB_FR \
   --project=$PROJECT_ID --region=$REGION \

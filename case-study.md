@@ -142,4 +142,69 @@ gcloud compute backend-services create $BS_NAME \
   --protocol=HTTP --load-balancing-scheme=INTERNAL_MANAGED \
   --health-checks=$HC_NAME
 
-gcloud com
+gcloud compute backend-services add-backend $BS_NAME \
+  --project=$PROJECT_ID --region=$REGION \
+  --instance-group=$IG_NAME --instance-group-zone=$ZONE
+
+# -------------------------
+echo "Creating Internal Load Balancer..."
+gcloud compute addresses create $ILB_IP \
+  --project=$PROJECT_ID --region=$REGION --subnet=$PROD_SUBNET \
+  --purpose=SHARED_LOADBALANCER_VIP \
+  --prefix-length=32 # Required for internal load balancers
+
+gcloud compute forwarding-rules create $ILB_FR \
+  --project=$PROJECT_ID --region=$REGION \
+  --load-balancing-scheme=INTERNAL_MANAGED \
+  --address=$ILB_IP --ports=80 \
+  --backend-service=$BS_NAME \
+  --network=$PROD_VPC \
+  --subnet=$PROD_SUBNET
+
+# -------------------------
+echo "Creating PSC NAT Subnet..."
+gcloud compute networks subnets create $PSC_NAT_SUBNET \
+  --project=$PROJECT_ID --region=$REGION \
+  --network=$PROD_VPC --range=10.0.1.0/28 \
+  --purpose=PRIVATE_SERVICE_CONNECT
+
+# -------------------------
+echo "Creating Service Attachment..."
+gcloud compute service-attachments create $SA_NAME \
+  --project=$PROJECT_ID --region=$REGION \
+  --producer-forwarding-rule=$ILB_FR \
+  --connection-preference=ACCEPT_AUTOMATIC \
+  --nat-subnets=$PSC_NAT_SUBNET
+
+SA_URI=$(gcloud compute service-attachments describe $SA_NAME \
+  --project=$PROJECT_ID --region=$REGION --format="value(selfLink)")
+
+# -------------------------
+echo "Creating PSC Endpoint in Consumer VPC..."
+gcloud compute addresses create $PSC_EP_IP \
+  --project=$PROJECT_ID --region=$REGION --subnet=$CONS_SUBNET \
+  --purpose=PRIVATE_SERVICE_CONNECT \
+  --address-type=INTERNAL
+
+gcloud compute forwarding-rules create $PSC_EP_FR \
+  --project=$PROJECT_ID --region=$REGION \
+  --network=$CONS_VPC --address=$PSC_EP_IP --ports=80 \
+  --target-service-attachment=$SA_URI \
+  --subnet=$CONS_SUBNET
+
+# -------------------------
+echo "Creating Consumer Test VM..."
+gcloud compute instances create $CLIENT_VM \
+  --project=$PROJECT_ID --zone=$ZONE \
+  --machine-type=e2-micro \
+  --subnet=$CONS_SUBNET \
+  --no-address
+
+EP_IP=$(gcloud compute addresses describe $PSC_EP_IP --project=$PROJECT_ID --region=$REGION --format="value(address)")
+
+echo "Testing connection from consumer VM..."
+gcloud compute ssh $CLIENT_VM --project=$PROJECT_ID --zone=$ZONE --tunnel-through-iap --command "
+curl -v http://$EP_IP
+"
+
+echo "✅ PSC setup completed successfully."
